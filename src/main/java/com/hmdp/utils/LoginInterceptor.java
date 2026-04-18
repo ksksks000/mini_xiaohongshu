@@ -16,17 +16,11 @@ import java.util.concurrent.TimeUnit;
 
 public class LoginInterceptor implements HandlerInterceptor {
 
-
-    private StringRedisTemplate stringRedisTemplate;
-
-    public LoginInterceptor(StringRedisTemplate stringRedisTemplate){
-        this.stringRedisTemplate = stringRedisTemplate;
-    }
-
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
 
-        /*HttpSession session = request.getSession();
+        /*旧的session拦截方法
+        HttpSession session = request.getSession();
         Object user = session.getAttribute("user");
 
         if (user==null){
@@ -37,32 +31,16 @@ public class LoginInterceptor implements HandlerInterceptor {
         UserHolder.saveUser((UserDTO) user);
         return true;*/
 
-        String token = request.getHeader("authorization");
-        if (StrUtil.isBlank(token)){
+        //判断是否需要拦截（ThreadLocal中是否有用户）
+        if (UserHolder.getUser() == null){
+            //没有，需要拦截，并设置状态码
             response.setStatus(401);
+            //拦截
             return false;
         }
-
-        Map<Object, Object> userMap = stringRedisTemplate.opsForHash()
-                .entries(RedisConstants.LOGIN_USER_KEY + token);
-
-
-        if (userMap.isEmpty()){
-            response.setStatus(401);
-            return false;
-        }
-        UserDTO userDTO = BeanUtil.fillBeanWithMap(userMap, new UserDTO(), false);
-
-        UserHolder.saveUser(userDTO);
-
-        stringRedisTemplate.expire(RedisConstants.LOGIN_USER_KEY + token,
-                                RedisConstants.LOGIN_USER_TTL,
-                                TimeUnit.MINUTES);
+        //有用户，放行
         return true;
+
     }
 
-    @Override
-    public void postHandle(HttpServletRequest request, HttpServletResponse response, Object handler, @Nullable ModelAndView modelAndView) throws Exception {
-        UserHolder.removeUser();
-    }
 }
