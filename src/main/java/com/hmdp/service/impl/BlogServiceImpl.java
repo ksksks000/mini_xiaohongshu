@@ -13,10 +13,12 @@ import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import java.util.List;
+import java.util.Set;
 
 /**
  * <p>
@@ -91,7 +93,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         blog.setIcon(user.getIcon());
     }
 
-    @Override
+/*    @Override
+    //这个架构因为Redis和数据库操作是绑定在一起的，严重影响了Redis的性能，所以不采用
     public Result likeBlog(Long id) {
 
         //1.获取登录用户id
@@ -118,8 +121,80 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 stringRedisTemplate.opsForSet().remove(key,userId.toString());
             }
         }
-
-
         return Result.ok();
+    }*/
+
+    /**
+     * Redis和 数据库 操作分开，释放Redis的效率
+     * 原理：
+     * 直接把点赞和取消点赞动作产生的影响放进Redis中的set
+     * 并且利用set集合的唯一性，标记 脏数据，即有修改的数据，交给后续数据库审查
+     * @param id
+     * @return
+     */
+    @Override
+    public Result likeBlog(Long id) {
+        // 1. 获取登录用户 id
+        Long userId = UserHolder.getUser().getId();
+        // 2. 定义 Redis Key
+        String key = "blog:liked:" + id;
+
+        // 3. 判断用户是否已点赞
+        Boolean isMember = stringRedisTemplate.opsForSet().isMember(key, userId.toString());
+
+        if (BooleanUtil.isFalse(isMember)) {
+            // 4.1 用户未点赞，执行点赞
+            // 只操作 Redis，添加用户 ID 到集合
+            stringRedisTemplate.opsForSet().add(key, userId.toString());
+
+            // 【新增】标记该博客的点赞数发生了变动，方便定时任务扫描
+            stringRedisTemplate.opsForSet().add("blog:liked:dirty", id.toString());
+
+        } else {
+            // 4.2 用户已点赞，取消点赞
+            // 只操作 Redis，从集合中移除用户 ID
+            stringRedisTemplate.opsForSet().remove(key, userId.toString());
+
+            // 【新增】同样标记为变动（防止取消后数量为0，但数据库还没更新的情况）
+            stringRedisTemplate.opsForSet().add("blog:liked:dirty", id.toString());
+        }
+
+        // 5. 直接返回，不操作数据库，速度极快
+        return Result.ok();
+    }
+
+    /**
+     * 定时任务：将 Redis 中的点赞数据同步到数据库
+     * 每 5 秒执行一次
+     */
+    @Scheduled(fixedDelay = 5000)
+    public void syncLikeToDatabase() {
+        // 1. 获取所有“被修改过”的博客 ID (脏数据列表)
+        Set<String> dirtyBlogIds = stringRedisTemplate.opsForSet().members("blog:liked:dirty");
+
+        // 如果没有变动的博客，直接返回
+        if (dirtyBlogIds == null || dirtyBlogIds.isEmpty()) {
+            return;
+        }
+
+        // 2. 遍历每一个被修改的博客
+        for (String blogIdStr : dirtyBlogIds) {
+            Long blogId = Long.valueOf(blogIdStr);
+            String key = "blog:liked:" + blogId;
+
+            // 3. 获取 Redis 中该博客所有点赞用户的集合
+            // 这一步是为了拿到最准确的“最终状态”
+            Set<String> likedUsers = stringRedisTemplate.opsForSet().members(key);
+
+            // 4. 计算真实的点赞数量
+            int realCount = (likedUsers == null) ? 0 : likedUsers.size();
+
+            // 5. 直接更新数据库（覆盖写，而不是增量写）
+            // 这样无论中间经历了多少次点赞/取消，数据库最终都会变成正确的数字
+            update().set("liked", realCount).eq("id", blogId).update();
+
+            // 6. 同步完成后，从“脏数据列表”中移除该博客 ID
+            stringRedisTemplate.opsForSet().remove("blog:liked:dirty", blogIdStr);
+        }
     }
 }
