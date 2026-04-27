@@ -49,24 +49,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    @Resource
+    @Resource(name = "redissonClient") // 明确告诉 Spring 我要 1 号
     private RedissonClient redissonClient;
 
     //创建一个线程(个数取决于你想要的快慢吧)
     private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
 
 
-
-
-    /**
-     * 用于在类一初始化的完毕时候就可以执行 阻塞队列
-     */
-
-
-    @PostConstruct
-    private void init(){
-        SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
-    }
 
     String queueName = "stream.orders";
     // 消费者组名称，通常与创建组时的名称一致
@@ -75,6 +64,36 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     String consumerName = "c1";
 
 
+    /**
+     * 【核心新增】项目启动时初始化 Redis Stream Group
+     * 这个注解保证了在 Spring 容器把这个 Bean 创建好之后，立刻执行这个方法
+     */
+    @PostConstruct
+    private void initStreamGroup() {
+        log.info("正在初始化 Redis Stream 消费者组: {} -> {}", queueName, groupName);
+        try {
+            // 尝试创建 Group
+            stringRedisTemplate.opsForStream().createGroup(
+                    queueName,
+                    ReadOffset.latest(),
+                    groupName
+            );
+            log.info("✅ Redis Stream 环境初始化成功: 消费者组 [{}] 已就绪", groupName);
+        } catch (Exception e) {
+            // 如果是消费者组已存在（BUSYGROUP），则忽略，继续启动
+            if (e instanceof org.springframework.data.redis.RedisSystemException
+                    && e.getCause() != null
+                    && e.getCause().getMessage().contains("BUSYGROUP")) {
+                log.warn("⚠️ 消费者组 [{}] 已存在，环境检查通过", groupName);
+            } else {
+                // 其他异常（如 Redis 连接失败、权限不足）导致启动失败
+                log.error("❌ 致命错误: Redis Stream 初始化失败，请检查 Redis 配置", e);
+                throw new RuntimeException("Redis Stream 初始化失败", e);
+            }
+        }
+        // 启动消费线程
+        SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
+    }
 
     //内部类
 
