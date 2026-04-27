@@ -70,4 +70,14 @@ public class BlogController {
     public Result queryBlogById(@PathVariable("id") Long id){
         return blogService.queryBlogById(id);
     }
+
+    /**
+     * 查询指定博客的点赞排行榜 Top 5
+     * @param id 博客ID
+     * @return 点赞用户列表
+     */
+    @GetMapping("/likes/{id}")
+    public Result queryBlogLikes(@PathVariable("id") Long id) {
+        return blogService.queryBlogLikes(id);
+    }
 }

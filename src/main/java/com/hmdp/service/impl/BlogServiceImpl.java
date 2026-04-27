@@ -1,8 +1,11 @@
 package com.hmdp.service.impl;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.BooleanUtil;
+import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
@@ -17,8 +20,10 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * <p>
@@ -74,14 +79,19 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         //获取当前用户id
         //注意，如果说当前没有用户登录，会报空指针异常，
         //你试图调用 UserDTO.getId() 方法，但是 UserHolder.getUser() 返回了 null
-        Long userId = UserHolder.getUser().getId();
-        //获取当前博客id
+        UserDTO user = UserHolder.getUser();
+        // 【重要修复】先判断用户是否登录，防止空指针异常
+        if (user == null) {
+            return;
+        }
+        Long userId = user.getId();
         Long blogId = blog.getId();
         String key = "blog:liked:" + blogId;
         //查询Redis的set集合中是否有记录
-        Boolean isMember = stringRedisTemplate.opsForSet().isMember(key, userId.toString());
-        //设置blog的liked状态回显给用户
-        blog.setIsLike(BooleanUtil.isTrue(isMember));
+        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
+
+        // 设置 blog 的 liked 状态回显给用户
+        blog.setIsLike(score != null);
 
     }
 
@@ -140,12 +150,12 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         String key = "blog:liked:" + id;
 
         // 3. 判断用户是否已点赞
-        Boolean isMember = stringRedisTemplate.opsForSet().isMember(key, userId.toString());
+        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
 
-        if (BooleanUtil.isFalse(isMember)) {
+        if (score == null) {
             // 4.1 用户未点赞，执行点赞
             // 只操作 Redis，添加用户 ID 到集合
-            stringRedisTemplate.opsForSet().add(key, userId.toString());
+            stringRedisTemplate.opsForZSet().add(key, userId.toString(),System.currentTimeMillis());
 
             // 【新增】标记该博客的点赞数发生了变动，方便定时任务扫描
             stringRedisTemplate.opsForSet().add("blog:liked:dirty", id.toString());
@@ -153,7 +163,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         } else {
             // 4.2 用户已点赞，取消点赞
             // 只操作 Redis，从集合中移除用户 ID
-            stringRedisTemplate.opsForSet().remove(key, userId.toString());
+            stringRedisTemplate.opsForZSet().remove(key, userId.toString());
 
             // 【新增】同样标记为变动（防止取消后数量为0，但数据库还没更新的情况）
             stringRedisTemplate.opsForSet().add("blog:liked:dirty", id.toString());
@@ -162,6 +172,37 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         // 5. 直接返回，不操作数据库，速度极快
         return Result.ok();
     }
+
+    // 该方法用于查询点赞排行榜 Top 5
+    @Override
+    public Result queryBlogLikes(Long id) {
+        String key = "blog:liked:" + id;
+        // 1. 从 SortedSet 中查询前 5 名点赞用户 (下标 0 到 4)
+        // 因为 score 是时间戳，所以这是最早点赞的 5 个人
+        Set<String> top5 = stringRedisTemplate.opsForZSet().range(key, 0, 4);
+        if (top5 == null || top5.isEmpty()) {
+            return Result.ok(Collections.emptyList());
+        }
+
+        // 2. 解析出其中的用户 id
+        List<Long> ids = top5.stream().map(Long::valueOf).collect(Collectors.toList());
+        String idStr = StrUtil.join(",", ids);
+
+        // 3. 根据用户 id 查询用户信息
+        // 【关键】使用 ORDER BY FIELD 保证数据库查询结果的顺序和 Redis 中的顺序一致
+        List<UserDTO> userDTOS = userService.query()
+                .in("id", ids)
+                .last("ORDER BY FIELD(id, " + idStr + ")")
+                .list()
+                .stream()
+                .map(user -> BeanUtil.copyProperties(user, UserDTO.class))
+                .collect(Collectors.toList());
+
+        // 4. 返回结果
+        return Result.ok(userDTOS);
+    }
+
+
 
     /**
      * 定时任务：将 Redis 中的点赞数据同步到数据库
