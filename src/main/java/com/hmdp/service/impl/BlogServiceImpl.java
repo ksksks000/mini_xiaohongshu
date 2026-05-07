@@ -225,14 +225,16 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
             // 3. 获取 Redis 中该博客所有点赞用户的集合
             // 这一步是为了拿到最准确的“最终状态”
-            Set<String> likedUsers = stringRedisTemplate.opsForSet().members(key);
+            //Set<String> likedUsers = stringRedisTemplate.opsForSet().members(key);
+            // 使用 opsForZSet().range 获取所有成员（0 到 -1 表示获取全部）
+            Set<String> likedUsers = stringRedisTemplate.opsForZSet().range(key, 0, -1);
 
             // 4. 计算真实的点赞数量
             int realCount = (likedUsers == null) ? 0 : likedUsers.size();
 
             // 5. 直接更新数据库（覆盖写，而不是增量写）
             // 这样无论中间经历了多少次点赞/取消，数据库最终都会变成正确的数字
-            update().set("liked", realCount).eq("id", blogId).update();
+            update().set("liked", realCount).eq("id", blogId).gt("liked",0).update();
 
             // 6. 同步完成后，从“脏数据列表”中移除该博客 ID
             stringRedisTemplate.opsForSet().remove("blog:liked:dirty", blogIdStr);
