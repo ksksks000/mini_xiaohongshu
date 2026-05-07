@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static com.hmdp.utils.RedisConstants.FEED_KEY;
+
 /**
  * <p>
  *  服务实现类
@@ -281,48 +283,67 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
      * @param offset
      * @return
      */
+
     @Override
     public Result queryBlogOfFollow(Long max, Integer offset) {
-        //1.获取当前用户
+        // 1. 获取当前登录用户ID
         Long userId = UserHolder.getUser().getId();
-        //2.查询收件箱
-        String key = "Feed" + userId;
+
+        // 2. 拼接当前用户的专属收件箱 Key 并查询 Redis (ZREVRANGEBYSCORE)
+        String key = FEED_KEY + userId;
+        // 每次固定查询2条数据（根据实际业务需求可调整）
         Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
                 .reverseRangeByScoreWithScores(key, 0, max, offset, 2);
-        //3.非空判断
-        if (typedTuples == null || typedTuples.isEmpty()){
-            return Result.ok();
+
+        // 3. 判空处理：如果收件箱为空或已经滑到底部，直接返回空结果
+        if (typedTuples == null || typedTuples.isEmpty()) {
+            return Result.ok(new ScrollResult());
         }
-        //4.解析数据：blogId,minTime(时间戳)，offset
+
+        // 4. 核心逻辑：解析 Redis 返回的数据，提取 blogId，并计算下一次查询的 minTime 和 offset
         List<Long> ids = new ArrayList<>(typedTuples.size());
-        long minTime = 0;
-        int os = 1;
-        for(ZSetOperations.TypedTuple<String> tuple : typedTuples){
-            //4.1获取id
+        long minTime = 0; // 记录本次查询结果中的最小时间戳
+        int os = 1;       // 记录最小时间戳出现的次数（偏移量）
+
+        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
+            // 4.1 获取笔记ID，放入集合
             ids.add(Long.valueOf(tuple.getValue()));
-            //4.2获取分数(时间戳)
+
+            // 4.2 获取分数（即发布时间戳）
             long time = tuple.getScore().longValue();
-            if (time == minTime){
+
+            // 4.3 【滚动分页精髓】：计算 minTime 和 offset
+            if (time == minTime) {
+                // 如果当前取出的时间戳，和我们记录的最小时间戳一样，说明重复了，偏移量 +1
                 os++;
-            }else{
+            } else {
+                // 如果不一样，因为是倒序排的，当前取出的肯定比之前的小
+                // 所以重置 minTime 为当前时间戳，重置偏移量为 1
                 minTime = time;
                 os = 1;
             }
         }
 
-        //5.根据id查询blog
+        // 5. 利用 MyBatis-Plus 根据解析出的 ID 集合，批量查询完整的博客信息
+        // 为了保证查出来的顺序和 Redis 中一致，需要使用 ORDER BY FIELD
         String idStr = StrUtil.join(",", ids);
-        List<Blog> blogs = query().in("in", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
+        List<Blog> blogs = this.query()
+                .in("id", ids)
+                .last("ORDER BY FIELD(id," + idStr + ")")
+                .list();
 
-        for(Blog blog : blogs){
-            queryBlogUser(blog);
-            isBlogLiked(blog);
+        // 6. 完善笔记信息（查询作者信息、判断当前用户是否点赞过等）
+        for (Blog blog : blogs) {
+            queryBlogUser(blog); // 查询并填充博客作者的用户信息
+            isBlogLiked(blog);   // 查询并填充当前用户对该博客的点赞状态
         }
-        //6.封装并返回
-        ScrollResult r = new ScrollResult();
-        r.setList(blogs);
-        r.setOffset(os);
-        r.setMinTime(minTime);
-        return Result.ok(r);
+
+        // 7. 封装滚动分页结果并返回
+        ScrollResult scrollResult = new ScrollResult();
+        scrollResult.setList(blogs);
+        scrollResult.setMinTime(minTime);
+        scrollResult.setOffset(os);
+
+        return Result.ok(scrollResult);
     }
 }
