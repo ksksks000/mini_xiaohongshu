@@ -10,6 +10,7 @@ import com.hmdp.service.IBlogService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
+import org.redisson.spring.session.config.EnableRedissonWebSession;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
@@ -93,4 +94,13 @@ public class BlogController {
         List<Blog> records = page.getRecords();
         return Result.ok(records);
     }
+
+    @GetMapping("/of/follow")
+    public Result queryBlogOfFollow(
+            @RequestParam("lastId") Long max,
+            @RequestParam(value = "offset",defaultValue = "0") Integer offset
+    ){
+        return blogService.queryBlogOfFollow(max,offset);
+    }
+
 }
