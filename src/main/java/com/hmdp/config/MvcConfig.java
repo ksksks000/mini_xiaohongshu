@@ -1,5 +1,6 @@
 package com.hmdp.config;
 
+import com.hmdp.service.impl.UVService;
 import com.hmdp.utils.LoginInterceptor;
 import com.hmdp.utils.RefreshTokenInterceptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,10 +16,14 @@ public class MvcConfig implements WebMvcConfigurer {
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private UVService uvService; // 注入 UVService
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         //登录拦截器
-        registry.addInterceptor(new LoginInterceptor())
+        registry.addInterceptor(new LoginInterceptor(uvService))
                 .excludePathPatterns(
                         "/shop/**",
                         "/voucher/**",
